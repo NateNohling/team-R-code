@@ -1,76 +1,93 @@
-## Install Packages
+# Packages ----------------------------------------------------------------
 packages <- c("dplyr", "magrittr", "jsonlite", "tidyr", "purrr", "stringr", "lubridate", "RMySQL","RCurl", "XML")
 options(warn = -1)
 lapply(packages, library, character.only = T)
 
-## Functions
-get_tbl <- function(year) { 
-  data.frame(URL = getHTMLLinks(paste0("http://football99.myfantasyleague.com/", year, "/index?YEAR=", year, "&SEARCH=dynasty"))) %>%
-  filter(str_count(URL, "[0-9]{5}$") > 0) %>%
-  mutate(URL = as.character(URL), LID = str_extract(URL,"[0-9]+$"), SEAS = year)
+# Functions ---------------------------------------------------------------
+# Whenever you can write a function, its good practice to. It allows you to edit code in a single location without having to sort through multiple lines and copy and paste changes. It cleans up your code, and allows you to run packages like Purrr which are function based.
+get_tbl <- function(year) {
+  
+  ## This function is going to paste the url that we are going to scrape to get the links that we need. In the paste0 command I am including the "year" variable which we can set below to scrape for certain years. We then filter that data frame to only the links that have 5 consecutive numeric values in the url and add in a column for the year.
+  data <- data.frame(URL = getHTMLLinks(paste0("http://football99.myfantasyleague.com/", year, "/index?YEAR=", year, "&SEARCH=dynasty"))) %>%
+    filter(str_count(URL, "[0-9]{5}$") > 0) %>%
+    mutate(URL = as.character(URL), LID = str_extract(URL,"[0-9]+$"), SEAS = year)
+  return(data)
 }
 get_loc <- function(x) {
   
+  ## Grab the specific URL that we are trying to get the HTTP header information for
   url <- lgTbl$URL[x]
   
-  #do some RCurl magic that I barely understand, but which basically gets the HTTP header information for the url in our lgTbl data frame and figures out the redirect that MFL actually wants you to visit for that league. I rarely use RCurl because there are other libraries built on top of it that do things like access apis. So I really don't know much beyond the fact that this code works.
+  ## Do some RCurl magic that I barely understand, but which basically gets the HTTP header information for the url in our lgTbl data frame and figures out the redirect that MFL actually wants you to visit for that league. I rarely use RCurl because there are other libraries built on top of it that do things like access apis. So I really don't know much beyond the fact that this code works.
   
   h <- basicHeaderGatherer()
   doc <- tryCatch(getURI(url, headerfunction = h$update), error = function(e) NA)
   loc <- tryCatch(h$value()[["Location"]], error = function(e) NA)
   
-  
   return(loc)
 }
 get_json <- function(x, data.type) {
-  
+  ## This function will allow us to grab specific data from the leagues. There are two variables, "x" which is the row number of the league, and "data.type" which is a variable that will help us navigate to the right URL.
   DOM <- lgTbl$DOM[x]
   SEAS <- lgTbl$SEAS[x]
   LID <- lgTbl$LID[x]
   
+  ## This if will run code only if we are looking to grab the league rules data
   if(data.type == "Rules") {
-  url <- paste0("http://www", DOM, ".myfantasyleague.com/", SEAS, "/export?TYPE=league&L=", LID, "&W=&JSON=1")
-  json_data <- tryCatch(fromJSON(url), error = function(e) NA)
-  data <- tryCatch(json_data$league$starters$position %>%
-      mutate(SEAS = SEAS, LID = LID), error = function(e) NULL)
+    url <- paste0("http://www", DOM, ".myfantasyleague.com/", SEAS, "/export?TYPE=league&L=", LID, "&W=&JSON=1")
+    json_data <- tryCatch(fromJSON(url), error = function(e) NA)
+    data <- tryCatch(json_data$league$starters$position %>%
+                       mutate(SEAS = SEAS, LID = LID), error = function(e) NULL)
   }
+  
+  ## This if will run code only if we are looking to grab the draft data
   if(data.type == "Draft") {
     url <- paste0("http://www", DOM, ".myfantasyleague.com/", SEAS, "/export?TYPE=draftResults&L=", LID, "&W=&JSON=1")
     json_data <- tryCatch(fromJSON(url), error = function(e) NA)
     data <- tryCatch(json_data$draftResults$draftUnit$draftPick %>%
-        mutate(SEAS = SEAS, LID = LID), error = function(e) NULL)
+                       mutate(SEAS = SEAS, LID = LID), error = function(e) NULL)
   }
   
   return(data)
 }
 get_player <- function() {
+  
+  ## This function will grab player data which we can join with the player ID column in the draft table
   url <- "http://football.myfantasyleague.com/2016/export?TYPE=players&DETAILS=1&JSON=1"
   json_data <- tryCatch(fromJSON(url), error = function(e) NA)
   data <- json_data$players$player
   return(data)
 }
 
-## Collect Data
+# Collect Data ------------------------------------------------------------
+# Specify what season you want
 years <- 2015:2016
 
+# Use Purrr to iterate through each year, collect a data frame of the data in the get_tbl function we created above
 lgTbl <- years %>%
   purrr::map_df(function(x) get_tbl(year = x))
 
+# Filter to just look at the first 100 leagues of the 2016 season
 lgTbl <- filter(lgTbl, SEAS == 2016) %>%
   filter(row_number() <= 100)
 
+# Use Purr to iterate through each league and grab the URL for the redirect and filtering out those that dont have a valid DOM value
 lgTbl <- mutate(lgTbl, LOC = 1:nrow(lgTbl) %>% purrr::map_chr(function(x) get_loc(x)), 
-               DOM = str_extract(LOC,"[0-9]{2}+")) %>%
+                DOM = str_extract(LOC,"[0-9]{2}+")) %>%
   filter(!is.na(DOM))
 
+# Use Purr to iterate through each league and grab the rule date in a new data frame, note the data.type
 ruleTbl <- 1:nrow(lgTbl) %>%
   purrr::map_df(function(x) get_json(x, data.type = "Rules"))
 
+# Use Purr to iterate through each league and grab the draft date in a new data frame, note the data.type
 drafts <- 1:nrow(lgTbl) %>%
   purrr::map_df(function(x) get_json(x, data.type = "Draft"))
 
+# Grab the player data in a new data frame
 plyrTbl <- get_player()
 
+# Grab a list of the 2 QB leagues, join with the draft table, filter out the picks that haven't been made because they have a blank timestamp, and join with the player table 
 twoQbDraft <- filter(ruleTbl, name == "QB", limit == 2) %>%
   inner_join(drafts, by = c("LID", "SEAS")) %>%
   filter(timestamp != "") %>%
