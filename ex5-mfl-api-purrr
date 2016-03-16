@@ -1,0 +1,82 @@
+## Install Packages
+packages <- c("dplyr", "magrittr", "jsonlite", "tidyr", "purrr", "stringr", "lubridate", "RMySQL","RCurl", "XML")
+options(warn = -1)
+lapply(packages, library, character.only = T)
+
+## Functions
+get_tbl <- function(year) { 
+  data.frame(URL = getHTMLLinks(paste0("http://football99.myfantasyleague.com/", year, "/index?YEAR=", year, "&SEARCH=dynasty"))) %>%
+  filter(str_count(URL, "[0-9]{5}$") > 0) %>%
+  mutate(URL = as.character(URL), LID = str_extract(URL,"[0-9]+$"), SEAS = year)
+}
+get_loc <- function(x) {
+  
+  url <- lgTbl$URL[x]
+  
+  #do some RCurl magic that I barely understand, but which basically gets the HTTP header information for the url in our lgTbl data frame and figures out the redirect that MFL actually wants you to visit for that league. I rarely use RCurl because there are other libraries built on top of it that do things like access apis. So I really don't know much beyond the fact that this code works.
+  
+  h <- basicHeaderGatherer()
+  doc <- tryCatch(getURI(url, headerfunction = h$update), error = function(e) NA)
+  loc <- tryCatch(h$value()[["Location"]], error = function(e) NA)
+  
+  
+  return(loc)
+}
+get_json <- function(x, data.type) {
+  
+  DOM <- lgTbl$DOM[x]
+  SEAS <- lgTbl$SEAS[x]
+  LID <- lgTbl$LID[x]
+  
+  if(data.type == "Rules") {
+  url <- paste0("http://www", DOM, ".myfantasyleague.com/", SEAS, "/export?TYPE=league&L=", LID, "&W=&JSON=1")
+  json_data <- tryCatch(fromJSON(url), error = function(e) NA)
+  data <- tryCatch(json_data$league$starters$position %>%
+      mutate(SEAS = SEAS, LID = LID), error = function(e) NULL)
+  }
+  if(data.type == "Draft") {
+    url <- paste0("http://www", DOM, ".myfantasyleague.com/", SEAS, "/export?TYPE=draftResults&L=", LID, "&W=&JSON=1")
+    json_data <- tryCatch(fromJSON(url), error = function(e) NA)
+    data <- tryCatch(json_data$draftResults$draftUnit$draftPick %>%
+        mutate(SEAS = SEAS, LID = LID), error = function(e) NULL)
+  }
+  
+  return(data)
+}
+get_player <- function() {
+  url <- "http://football.myfantasyleague.com/2016/export?TYPE=players&DETAILS=1&JSON=1"
+  json_data <- tryCatch(fromJSON(url), error = function(e) NA)
+  data <- json_data$players$player
+  return(data)
+}
+
+## Collect Data
+years <- 2015:2016
+
+lgTbl <- years %>%
+  purrr::map(function(x) get_tbl(year = x)) %>%
+  compact %>% bind_rows %>% data.frame
+
+lgTbl <- filter(lgTbl, SEAS == 2016) %>%
+  filter(row_number() <= 100)
+
+lgTbl <- mutate(lgTbl, LOC = 1:nrow(lgTbl) %>% purrr::map(function(x) get_loc(x)) %>% unlist, 
+               DOM = str_extract(LOC,"[0-9]{2}+")) %>%
+  filter(!is.na(DOM))
+
+ruleTbl <- 1:nrow(lgTbl) %>%
+  purrr::map(function(x) get_json(x, data.type = "Rules")) %>%
+  compact %>% bind_rows %>% data.frame
+
+drafts <- 1:nrow(lgTbl) %>%
+  purrr::map(function(x) get_json(x, data.type = "Draft")) %>%
+  compact %>% bind_rows %>% data.frame
+
+plyrTbl <- get_player()
+
+twoQbDraft <- filter(ruleTbl, name == "QB", limit == 2) %>%
+  inner_join(drafts, by = c("LID", "SEAS")) %>%
+  filter(timestamp != "") %>%
+  select(-name, -limit) %>%
+  inner_join(plyrTbl, by = c("player" = "id")) %>%
+  arrange(LID, timestamp)
